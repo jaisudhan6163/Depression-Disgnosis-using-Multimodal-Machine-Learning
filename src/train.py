@@ -19,16 +19,19 @@ from torch.utils.data import DataLoader
 from .data.dataset import DDMMLDataset, build_datasets
 from .evaluate import best_threshold, compute_metrics, format_metrics, summarize_seeds
 from .models.baselines import joined_turns, majority_class_baseline, tfidf_logreg_baseline
-from .models.fusion import MultimodalLSTM, UnimodalLSTM
+from .models.fusion import MultimodalLSTM, MultimodalTransformerText, TransformerTextOnly, UnimodalLSTM
 from .utils import git_sha, set_seed
 
 MODALITIES = ["text", "audio", "video"]
+COLLATE_KEYS = ["text", "audio", "video", "audio_mask", "video_mask", "lexical", "label",
+                "text_turns_emb", "text_turns_mask"]
 
 
 def collate(batch: list[dict]) -> dict:
     out = {}
-    for key in ["text", "audio", "video", "audio_mask", "video_mask", "lexical", "label"]:
-        out[key] = torch.stack([b[key] for b in batch])
+    for key in COLLATE_KEYS:
+        if key in batch[0]:
+            out[key] = torch.stack([b[key] for b in batch])
     out["participant_id"] = [b["participant_id"] for b in batch]
     return out
 
@@ -50,6 +53,15 @@ def forward_fusion(model: MultimodalLSTM, batch: dict) -> torch.Tensor:
 
 def forward_unimodal(model: UnimodalLSTM, batch: dict, modality: str) -> torch.Tensor:
     return model(batch[modality]).squeeze(-1)
+
+
+def forward_transformer_fusion(model: MultimodalTransformerText, batch: dict) -> torch.Tensor:
+    return model(batch["text_turns_emb"], batch["text_turns_mask"], batch["lexical"],
+                 batch["audio"], batch["video"]).squeeze(-1)
+
+
+def forward_transformer_text_only(model: TransformerTextOnly, batch: dict) -> torch.Tensor:
+    return model(batch["text_turns_emb"], batch["text_turns_mask"], batch["lexical"]).squeeze(-1)
 
 
 def train_one_model(model: nn.Module, forward_fn, datasets: dict, config: dict, seed: int) -> dict:
@@ -147,15 +159,48 @@ def run_unimodal(modality: str, datasets: dict, config: dict, seeds: list[int]) 
     return results
 
 
+def run_transformer_fusion(datasets: dict, config: dict, seeds: list[int]) -> list[dict]:
+    text_hidden = datasets["train"][0]["text_turns_emb"].shape[-1]
+    audio_dim = datasets["train"][0]["audio"].shape[-1]
+    video_dim = datasets["train"][0]["video"].shape[-1]
+    results = []
+    for seed in seeds:
+        set_seed(seed)
+        model = MultimodalTransformerText(text_hidden, audio_dim, video_dim, config["model"]["hidden_size"],
+                                           config["model"]["output_size"], config["model"]["dropout"])
+        res = train_one_model(model, forward_transformer_fusion, datasets, config, seed)
+        print(f"  seed {seed}: " + format_metrics("fusion_transformer/dev", res["dev"]))
+        print(f"  seed {seed}: " + format_metrics("fusion_transformer/test", res["test"]))
+        results.append(res)
+    ckpt_dir = Path(config["checkpoints"]["dir"])
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(results[0]["state_dict"], ckpt_dir / "multimodal_transformer_text.pth")
+    return results
+
+
+def run_transformer_text_only(datasets: dict, config: dict, seeds: list[int]) -> list[dict]:
+    text_hidden = datasets["train"][0]["text_turns_emb"].shape[-1]
+    results = []
+    for seed in seeds:
+        set_seed(seed)
+        model = TransformerTextOnly(text_hidden, config["model"]["output_size"], config["model"]["dropout"])
+        res = train_one_model(model, forward_transformer_text_only, datasets, config, seed)
+        results.append(res)
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--transformer-text", action="store_true",
+                         help="Also run the Tier 2.1 transformer+attention-pooling text encoder "
+                              "(fusion and text-only variants) alongside the Tier 1 word-level-LSTM models.")
     args = parser.parse_args()
 
     config = yaml.safe_load(open(args.config))
     print(f"[train] git SHA: {git_sha()}")
 
-    datasets, _, _ = build_datasets(config)
+    datasets, _, _ = build_datasets(config, include_transformer_text=args.transformer_text)
     seeds = config["train"]["seeds"]
 
     print("\n=== Majority class baseline ===")
@@ -192,6 +237,23 @@ def main():
             "dev_summary": summarize_seeds([r["dev"] for r in runs]),
             "test_summary": summarize_seeds([r["test"] for r in runs]),
             "per_seed": [{"dev": r["dev"], "test": r["test"]} for r in runs],
+        }
+
+    if args.transformer_text:
+        print(f"\n=== fusion_transformer (transformer text + audio/video LSTM), {len(seeds)} seeds ===")
+        ft_runs = run_transformer_fusion(datasets, config, seeds)
+        results_summary["fusion_transformer_text"] = {
+            "dev_summary": summarize_seeds([r["dev"] for r in ft_runs]),
+            "test_summary": summarize_seeds([r["test"] for r in ft_runs]),
+            "per_seed": [{"dev": r["dev"], "test": r["test"]} for r in ft_runs],
+        }
+
+        print(f"\n=== text_only_transformer, {len(seeds)} seeds ===")
+        tt_runs = run_transformer_text_only(datasets, config, seeds)
+        results_summary["text_only_transformer"] = {
+            "dev_summary": summarize_seeds([r["dev"] for r in tt_runs]),
+            "test_summary": summarize_seeds([r["test"] for r in tt_runs]),
+            "per_seed": [{"dev": r["dev"], "test": r["test"]} for r in tt_runs],
         }
 
     Path("results").mkdir(exist_ok=True)

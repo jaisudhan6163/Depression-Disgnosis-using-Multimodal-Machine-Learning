@@ -1,33 +1,41 @@
 # Depression Screening Support — Multimodal Interview Analysis
 
 A research prototype that estimates depression-screening risk from DAIC-WOZ
-clinical interviews using three parallel LSTMs (text, audio, video), fused by
-concatenation. **This is not a diagnosis and not a medical device** — PHQ-8
-is a self-report screening instrument, not a clinical diagnosis, and this
-model's own evaluation (below) shows it does not generalize to held-out
-data. See [Limitations](#limitations).
+clinical interviews, fusing text, audio, and video branches. **This is not a
+diagnosis and not a medical device** — PHQ-8 is a self-report screening
+instrument, not a clinical diagnosis, and this model's own evaluation
+(below) shows it does not generalize to held-out data. See
+[Limitations](#limitations).
 
-This repo went through a Tier 0 (correctness) + Tier 1 (honest evaluation)
-pass; see [ROADMAP.md](ROADMAP.md) for the full multi-tier plan this is one
-phase of, and [results/ablations.md](results/ablations.md) for the current
-numbers and what they mean.
+This repo went through a Tier 0 (correctness) + Tier 1 (honest evaluation) +
+Tier 2.1 (transformer text encoder) pass; see [ROADMAP.md](ROADMAP.md) for
+the full multi-tier plan this is part of, and
+[results/ablations.md](results/ablations.md) for the current numbers and
+what they mean.
 
 ## Architecture
 
-DAIC-WOZ interview → three parallel single-layer LSTMs:
-- **Text**: participant turns → per-word GloVe-300d vectors → fixed
-  (250 turns × 20 words × 300 dims) tensor, flattened to a 5000-step sequence.
+Two text encoders are available (`config.yaml` / `--transformer-text`),
+sharing unchanged audio/video LSTM branches:
+
+- **Text (Tier 1, default)**: participant turns → per-word GloVe-300d
+  vectors → fixed (250 turns × 20 words × 300 dims) tensor, flattened to a
+  5000-step sequence → LSTM.
+- **Text (Tier 2.1, `--transformer-text`)**: participant turns → frozen
+  `distilbert-base-uncased`, mean-pooled per turn (768-dim) → trainable
+  attention pooling across turns → concatenated with first-person-singular
+  rate / negation rate.
 - **Audio**: COVAREP (74-dim, 100Hz) → z-scored (train-split stats) →
-  resampled to 1000 frames uniformly covering the whole interview.
+  resampled to 1000 frames uniformly covering the whole interview → LSTM.
 - **Video**: CLNF AU/landmarks/gaze/pose (concatenated, HOG excluded) →
   z-scored → downsampled 2x → resampled to 1000 frames uniformly covering
-  the whole interview.
+  the whole interview → LSTM.
 
 → concatenated final hidden states → `Linear(hidden*3, 1)` → sigmoid.
 
 Baselines: majority class, TF-IDF + logistic regression on transcripts, and
-text-only / audio-only / video-only LSTM ablations, all evaluated with the
-same protocol as the fusion model.
+text-only / audio-only / video-only ablations (each text encoder has its
+own text-only ablation), all evaluated with the same protocol as fusion.
 
 ## Results
 
@@ -35,12 +43,15 @@ same protocol as the fusion model.
 |---|---|---|
 | Majority class | 0.000 | 0.500 |
 | TF-IDF + LogisticRegression | **0.464** | **0.561** |
-| Fusion LSTM | 0.360 ± 0.048 | 0.474 |
+| Fusion, GloVe+LSTM text (Tier 1) | 0.372 ± 0.048 | 0.455 |
+| Fusion, transformer+attention-pool text (Tier 2.1) | 0.409 ± 0.031 | 0.486 |
 
-**The simple TF-IDF baseline beats the fusion LSTM on held-out test data.**
-All three LSTM variants (text/audio/video-only and fusion) show a large
-dev-to-test gap — overfitting on 107 training examples with ~250k
-parameters. Full table, per-seed numbers, and discussion in
+**The simple TF-IDF baseline still beats every LSTM/transformer fusion
+variant on held-out test AUROC.** The Tier 2.1 text encoder narrows the
+dev-to-test overfitting gap (more training data would matter more than a
+better text encoder at this point) but doesn't close it — every
+LSTM-based model's test AUROC is still at or below 0.5. Full table,
+per-seed numbers, and discussion in
 [results/ablations.md](results/ablations.md).
 
 ## Setup
@@ -71,12 +82,18 @@ Word vectors: GloVe-300d via `gensim.downloader`, saved to
 `models/glove.300d.kv` — not the FastText vectors the original version of
 this project used (crawl-300d-2M.vec, 4.5GB) or this dataset's own
 GoogleNews vectors (3.6GB); neither fit the available disk budget. GloVe-300d
-keeps the same 300-dim input the architecture expects.
+keeps the same 300-dim input the architecture expects. The Tier 2.1
+transformer text encoder (`distilbert-base-uncased`, ~270MB) downloads
+automatically via `transformers` the first time `--transformer-text` is
+used — MentalBERT (the roadmap's first choice) and its AIMH mirror are
+both gated on Hugging Face without pre-authorized access; see
+`src/data/features/text_transformer.py`.
 
 ```bash
-python -m src.train          # builds/caches features, trains 5 seeds x 4 model variants, writes results/metrics.json
-pytest tests/                # shape, train/inference-parity, and overfit sanity tests
-streamlit run app.py         # inference UI (needs a trained checkpoint under models/checkpoints/)
+python -m src.train                        # Tier 0/1: builds/caches features, trains 5 seeds x 4 model variants
+python -m src.train --transformer-text      # also runs the Tier 2.1 transformer-text fusion + text-only variants
+pytest tests/                               # shape, train/inference-parity, and overfit sanity tests
+streamlit run app.py                        # inference UI (needs a trained checkpoint under models/checkpoints/)
 ```
 
 ## Repo structure
@@ -84,11 +101,12 @@ streamlit run app.py         # inference UI (needs a trained checkpoint under mo
 ```
 src/
   data/
-    features/       # text.py, audio.py, video.py, common.py — shared by train.py AND prcsfle.py (inference)
+    features/       # text.py, audio.py, video.py, text_transformer.py, common.py -- shared by train.py AND prcsfle.py (inference)
     loaders.py       # official split loading, ID-aligned across modalities
     dataset.py       # caching, Dataset/DataLoader construction
   models/
-    fusion.py        # MultimodalLSTM, UnimodalLSTM
+    fusion.py         # MultimodalLSTM, UnimodalLSTM, MultimodalTransformerText, TransformerTextOnly
+    text_encoder.py    # AttentionPool, TransformerTextHead (Tier 2.1)
     baselines.py      # majority class, TF-IDF+LogisticRegression
   train.py            # 5-seed training + evaluation entry point
   evaluate.py          # F1/precision/recall/AUROC/AUPRC, dev-tuned threshold
@@ -140,6 +158,12 @@ with before/after code):
 - No baselines existed. Majority-class and TF-IDF+LogisticRegression are
   now run with the same protocol — and beat the LSTM (see Results above).
 
+**Tier 2.1** replaced the static-GloVe, flat 5000-step word-level text LSTM
+with a frozen pretrained transformer encoding each turn independently,
+aggregated by a trainable attention-pooling head — narrows but does not
+close the dev/test overfitting gap (see Results above and
+[results/ablations.md](results/ablations.md)).
+
 ## Limitations
 
 - **n=188** (107/34/47 train/dev/test), a single US-based sample from a
@@ -148,15 +172,20 @@ with before/after code):
   uniform across gender, dialect, culture, or age.
 - The dataset is a third-party Kaggle mirror, not the official USC ICT
   distribution — verify licensing before any use beyond research/education.
-- **This model does not currently generalize**: test AUROC for the fusion
-  LSTM (0.47) and every unimodal LSTM variant is at or below chance,
+- **This model does not currently generalize**: test AUROC for every
+  LSTM/transformer fusion or unimodal variant is at or below chance,
   despite reasonable dev performance. Only the TF-IDF baseline clears
   chance on test. Do not treat any of these numbers as usable for
   screening decisions.
 - The displayed "risk score" is a raw sigmoid output, not a calibrated
   probability (no Platt scaling / isotonic regression has been applied).
-- This pass (Tier 0 + Tier 1) fixed correctness and measurement; it did not
-  address the modeling upgrades in ROADMAP.md Tier 2 (transformer text
-  encoder, eGeMAPS/wav2vec audio, OpenFace video, attention fusion) or the
-  cross-corpus generalization work in Tier 3, both of which the results
-  above suggest are necessary before this is more than a teaching example.
+- This pass (Tier 0 + Tier 1 + Tier 2.1) fixed correctness, measurement,
+  and the text encoder; it did not address the remaining Tier 2 modeling
+  upgrades (eGeMAPS/wav2vec audio, CLNF-derived behavioral-stats or
+  OpenFace video, attention fusion across modalities, PHQ-8 regression) or
+  the cross-corpus generalization work in Tier 3 — the results above
+  suggest more training data matters more than further architecture
+  changes at this sample size, which no Tier 2/3 item on its own fixes.
+- The Tier 2.1 text encoder is `distilbert-base-uncased`, not the
+  roadmap's preferred mental-health-specific MentalBERT (gated, no
+  pre-authorized access) — see `src/data/features/text_transformer.py`.

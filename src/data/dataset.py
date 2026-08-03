@@ -15,7 +15,7 @@ import torch
 from gensim.models import KeyedVectors
 from torch.utils.data import Dataset
 
-from .features import audio, text, video
+from .features import audio, text, text_transformer, video
 from .features.common import Scaler
 from .loaders import Split, load_splits, participant_data_dir
 
@@ -80,20 +80,37 @@ class ParticipantCache:
         )
         return out
 
+    def _transformer_path(self, participant_id: str) -> Path:
+        return self.cache_dir / f"{participant_id}_text_transformer.npz"
+
+    def transformer_text(self, participant_id: str) -> dict:
+        """Frozen transformer turn embeddings (Tier 2.1), cached separately
+        from the GloVe word-level tensor since it's a heavier, optional
+        dependency most Tier 0/1 runs don't need."""
+        path = self._transformer_path(participant_id)
+        if path.exists():
+            data = np.load(path)
+            return {"embeddings": data["embeddings"], "mask": data["mask"]}
+        turns = self.raw(participant_id)["turns"]
+        emb = text_transformer.encode_turns(list(turns))
+        fixed, mask = text_transformer.pad_turns(emb)
+        np.savez_compressed(path, embeddings=fixed, mask=mask)
+        return {"embeddings": fixed, "mask": mask}
+
 
 class DDMMLDataset(Dataset):
     """One split (train/dev/test), fully materialized as normalized,
     fixed-length tensors, ID-aligned with labels."""
 
     def __init__(self, split: Split, cache: ParticipantCache, audio_scaler: Scaler, video_scaler: Scaler,
-                 audio_len: int = 1000, video_len: int = 1000):
+                 audio_len: int = 1000, video_len: int = 1000, include_transformer_text: bool = False):
         self.split = split
         self.items = []
         for pid in split.participant_ids:
             raw = cache.raw(pid)
             audio_tensor, audio_mask = audio.to_tensor(raw["audio_raw"], audio_scaler, target_len=audio_len)
             video_tensor, video_mask = video.to_tensor(raw["video_raw"], video_scaler, target_len=video_len)
-            self.items.append({
+            item = {
                 "participant_id": pid,
                 "turns": raw["turns"],
                 "text": torch.from_numpy(raw["text_tensor"]).view(-1, text.EMBED_DIM).float(),
@@ -103,7 +120,12 @@ class DDMMLDataset(Dataset):
                 "video_mask": torch.from_numpy(video_mask).float(),
                 "lexical": torch.tensor([raw["first_person_singular_rate"], raw["negation_rate"]], dtype=torch.float32),
                 "label": torch.tensor(float(split.label(pid))),
-            })
+            }
+            if include_transformer_text:
+                tt = cache.transformer_text(pid)
+                item["text_turns_emb"] = torch.from_numpy(tt["embeddings"]).float()
+                item["text_turns_mask"] = torch.from_numpy(tt["mask"]).float()
+            self.items.append(item)
 
     def __len__(self) -> int:
         return len(self.items)
@@ -118,7 +140,7 @@ def fit_scalers(train_split: Split, cache: ParticipantCache) -> tuple[Scaler, Sc
     return audio.fit_scaler(audio_raws), video.fit_scaler(video_raws)
 
 
-def build_datasets(config: dict) -> tuple[dict[str, DDMMLDataset], Scaler, Scaler]:
+def build_datasets(config: dict, include_transformer_text: bool = False) -> tuple[dict[str, DDMMLDataset], Scaler, Scaler]:
     splits = load_splits(config)
     data_dir = participant_data_dir(config)
     cache = ParticipantCache(config["data"]["cache_dir"], data_dir, config["data"]["word_vectors"])
@@ -137,7 +159,8 @@ def build_datasets(config: dict) -> tuple[dict[str, DDMMLDataset], Scaler, Scale
     video_len = config["features"]["video"]["max_frames"]
 
     datasets = {
-        name: DDMMLDataset(split, cache, audio_scaler, video_scaler, audio_len=audio_len, video_len=video_len)
+        name: DDMMLDataset(split, cache, audio_scaler, video_scaler, audio_len=audio_len, video_len=video_len,
+                            include_transformer_text=include_transformer_text)
         for name, split in splits.items()
     }
 

@@ -174,12 +174,12 @@ With 189 participants, a single split is noise.
 
 Ordered by expected payoff per unit effort.
 
-### 2.1 Text — biggest win, least effort
+### 2.1 Text — biggest win, least effort — done, see [results/ablations.md](results/ablations.md)
 
-- [ ] Replace static fastText with a fine-tuned transformer over participant turns: **RoBERTa**, or better, **MentalBERT / PsychBERT** (pretrained on mental-health corpora).
-- [ ] Encode each turn independently, then aggregate turn embeddings with **attention pooling** rather than flattening 5,000 tokens into one LSTM.
-- [ ] Add interpretable features alongside: first-person singular rate, absolutist-word rate, negative-emotion density, mean response latency, disfluency counts, turn-length distribution.
-- [ ] Freeze the encoder and train only the head first; unfreeze the top layers later if dev F1 supports it.
+- [x] Replace static fastText with a transformer over participant turns: **RoBERTa**, or better, **MentalBERT / PsychBERT** (pretrained on mental-health corpora). Used `distilbert-base-uncased`, not fine-tuned (see next item) — MentalBERT and its AIMH mirror are both gated on Hugging Face without pre-authorized access.
+- [x] Encode each turn independently, then aggregate turn embeddings with **attention pooling** rather than flattening 5,000 tokens into one LSTM.
+- [ ] Add interpretable features alongside: first-person singular rate, absolutist-word rate, negative-emotion density, mean response latency, disfluency counts, turn-length distribution. Only the first two (from Tier 0.6) are implemented.
+- [x] Freeze the encoder and train only the head first. (Unfreezing top layers later, if dev F1 supports it, not attempted — dev F1 did not clearly support it: see results/ablations.md.)
 
 ### 2.2 Audio
 
@@ -382,7 +382,7 @@ Many papers reporting 90%+ accuracy on this dataset have leakage, an undisclosed
 - [x] Report F1 / AUROC / AUPRC + confusion matrix
 - [x] Add four baselines
 - [x] 5-seed mean ± std
-- [ ] Transformer text encoder
+- [x] Transformer text encoder
 - [ ] eGeMAPS or wav2vec audio
 - [ ] OpenFace normalized video features
 - [ ] PHQ-8 regression auxiliary task
