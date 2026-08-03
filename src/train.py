@@ -123,6 +123,7 @@ def run_fusion(datasets: dict, config: dict, seeds: list[int]) -> list[dict]:
     )
     results = []
     for seed in seeds:
+        set_seed(seed)  # before model construction: seed must also cover weight initialization
         model = MultimodalLSTM(text_dim, audio_dim, video_dim, config["model"]["hidden_size"],
                                 config["model"]["output_size"], config["model"]["dropout"])
         res = train_one_model(model, forward_fusion, datasets, config, seed)
@@ -139,6 +140,7 @@ def run_unimodal(modality: str, datasets: dict, config: dict, seeds: list[int]) 
     dim = datasets["train"][0][modality].shape[-1]
     results = []
     for seed in seeds:
+        set_seed(seed)  # before model construction: seed must also cover weight initialization
         model = UnimodalLSTM(dim, config["model"]["hidden_size"], config["model"]["output_size"], config["model"]["dropout"])
         res = train_one_model(model, lambda m, b: forward_unimodal(m, b, modality), datasets, config, seed)
         results.append(res)
