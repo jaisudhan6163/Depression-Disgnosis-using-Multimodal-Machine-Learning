@@ -1,39 +1,44 @@
 import streamlit as st
 import pandas as pd
+
 from prcsfle import process_pds
-st.write('### Depression Detection using Multimodal Machine Learning')
 
-transcript = st.file_uploader("Upload Transript File")
-if transcript:
-    transcript = pd.read_csv(transcript, delimiter = '\t', encoding = 'utf-8', engine = 'python')
+st.write('### Depression Screening Support — Multimodal Interview Analysis')
+st.info(
+    "Research prototype, not a medical device. This tool does not diagnose "
+    "depression; it estimates risk from a fixed LSTM model trained on a small "
+    "(n<200) research corpus and should not be used for clinical decisions. "
+    "If you or someone you know is struggling, contact a mental health "
+    "professional or a crisis line in your region."
+)
 
+transcript = st.file_uploader("Upload Transcript File")
 covarep = st.file_uploader("Upload COVAREP File")
-if covarep:
-    covarep = pd.read_csv(covarep, header = None)
-
 clnf_au = st.file_uploader("Upload CLNF AU File")
-if clnf_au:
-    clnf_au = pd.read_csv(clnf_au, delimiter = ',', engine = 'python')
-
 clnf_feat = st.file_uploader("Upload CLNF Feature File")
-if clnf_feat:
-    clnf_feat = pd.read_csv(clnf_feat, delimiter = ',', engine = 'python')
-
 clnf_feat3d = st.file_uploader("Upload CLNF Feature3D File")
-if clnf_feat3d:
-    clnf_feat3d = pd.read_csv(clnf_feat3d, delimiter = ',', engine = 'python')
-
 clnf_gaze = st.file_uploader("Upload CLNF Gaze File")
-if clnf_gaze:
-    clnf_gaze = pd.read_csv(clnf_gaze, delimiter = ',', engine = 'python')
-
 clnf_pose = st.file_uploader("Upload CLNF Pose File")
-if clnf_pose:
-    clnf_pose = pd.read_csv(clnf_pose, delimiter = ',', engine = 'python')
 
 is_submit = st.button('Submit')
 
 if is_submit:
-    #st.write(all([transcript, covarep, clnf_au, clnf_feat, clnf_feat3d, clnf_gaze, clnf_pose]))
-    out = process_pds(transcript, covarep, clnf_au, clnf_feat, clnf_feat3d, clnf_gaze, clnf_pose)
-    st.write('##### There is ' + str(int(out*100)) + '% of chance the person being depressed.')
+    uploads = [transcript, covarep, clnf_au, clnf_feat, clnf_feat3d, clnf_gaze, clnf_pose]
+    if not all(uploads):
+        st.error("Please upload all seven files before submitting.")
+    else:
+        try:
+            transcript_df = pd.read_csv(transcript, delimiter='\t', encoding='utf-8', engine='python')
+            covarep_df = pd.read_csv(covarep, header=None)
+            with st.spinner("Extracting features and running the model..."):
+                result = process_pds(transcript_df, covarep_df, clnf_au, clnf_feat, clnf_feat3d, clnf_gaze, clnf_pose)
+        except Exception as e:
+            st.error(f"Could not process the uploaded files: {e}")
+        else:
+            st.write(f"##### Estimated risk score: {result['probability']*100:.0f}%")
+            st.caption(
+                "This is a raw model score, not a calibrated probability and not a diagnosis. "
+                f"Audio coverage: {result['audio_coverage']*100:.0f}% of the fixed window, "
+                f"video coverage: {result['video_coverage']*100:.0f}%, "
+                f"{result['n_turns']} participant turns detected."
+            )

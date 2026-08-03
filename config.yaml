@@ -1,0 +1,39 @@
+# Paths and hyperparameters for the DDMML pipeline.
+# Override with --config path/to/other.yaml if you have the full 189-participant corpus.
+
+data:
+  root: daic_woz
+  labels_dir: daic_woz/labels
+  train_split_csv: daic_woz/labels/train_split_Depression_AVEC2017.csv
+  dev_split_csv: daic_woz/labels/dev_split_Depression_AVEC2017.csv
+  test_split_csv: daic_woz/labels/full_test_split.csv
+  cache_dir: cache
+  word_vectors: models/glove.300d.kv
+
+features:
+  text:
+    max_turns: 250
+    embedding_dim: 300
+  audio:
+    max_frames: 1000
+    n_covarep: 74
+  video:
+    max_frames: 1000
+    n_features: 388
+
+model:
+  hidden_size: 32
+  dropout: 0.3
+  weight_decay: 1.0e-4
+  output_size: 1
+
+train:
+  epochs: 40
+  batch_size: 8
+  learning_rate: 1.0e-3
+  grad_clip_norm: 1.0
+  early_stopping_patience: 8
+  seeds: [0, 1, 2, 3, 4]
+
+checkpoints:
+  dir: models/checkpoints

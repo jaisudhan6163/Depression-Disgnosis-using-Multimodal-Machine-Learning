@@ -1,60 +1,90 @@
-import pandas as pd
-import numpy as np
+"""Inference entry point for the Streamlit app.
+
+Fixes Tier 0.1 / 0.7: this used to duplicate its own text/audio/video
+preprocessing (text_processing.py, audio_processing.py, video_processing.py)
+which had drifted from the training notebook -- most seriously, a swapped
+tensor shape that silently truncated every interview to ~20 turns. It now
+imports the exact same feature-extraction code the training pipeline uses
+(src/data/features/*), so there is only one implementation to keep correct,
+and applies the *same* persisted train-split scalers rather than leaving
+audio/video features unnormalized.
+"""
+from __future__ import annotations
 
 import torch
-import torch.nn as nn
-import torch.optim as optim
+import yaml
+from gensim.models import KeyedVectors
 
-import text_processing
-import video_processing
-import audio_processing
+from src.data.features import audio, text, video
+from src.data.features.common import Scaler
+from src.models.fusion import MultimodalLSTM
+from src.utils import load_checkpoint
 
-class MultimodalLSTM(nn.Module):
-    def __init__(self, text_modal, audio_modal, video_modal, hidden_size, output_size):
-        super(MultimodalLSTM, self).__init__()
-        self.text_layer = nn.LSTM(input_size=text_modal, hidden_size=hidden_size, batch_first=True)
-        self.audio_layer = nn.LSTM(input_size=audio_modal, hidden_size=hidden_size, batch_first=True)
-        self.video_layer = nn.LSTM(input_size=video_modal, hidden_size=hidden_size, batch_first=True)
-        self.fc = nn.Linear(hidden_size * 3, output_size)
+_CONFIG = yaml.safe_load(open("config.yaml"))
+_WORD_VECTORS = None
+_MODEL = None
+_AUDIO_SCALER = None
+_VIDEO_SCALER = None
 
-    def forward(self, x1, x2, x3):
-        _, (h1, _) = self.text_layer(x1)
-        _, (h2, _) = self.audio_layer(x2)
-        _, (h3, _) = self.video_layer(x3)
-        combined = torch.cat((h1[-1], h2[-1], h3[-1]), dim=0)
-        output = torch.sigmoid(self.fc(combined))
-        return float(output)
-    
-def make_predictions(input_data1, input_data2, input_data3):
-    model = MultimodalLSTM(300, 74, 388, 64, 1)
-    model.load_state_dict(torch.load('./models/multimodal_lstm_model_10_epochs.pth'))
-    model.eval()
 
-    output = model(input_data1, input_data2, input_data3)
+def _word_vectors() -> KeyedVectors:
+    global _WORD_VECTORS
+    if _WORD_VECTORS is None:
+        _WORD_VECTORS = KeyedVectors.load(_CONFIG["data"]["word_vectors"])
+    return _WORD_VECTORS
 
-    return output
 
-def process_pds(transcript, covarep, clnf_au, clnf_feat, clnf_feat3d, clnf_gaze, clnf_pose):
-    text_tensor = text_processing.return_tensor(transcript)
-    audio_tensor = audio_processing.return_tensor(covarep)
-    video_tensor = video_processing.return_tensor(clnf_au, clnf_feat, clnf_feat3d, clnf_gaze, clnf_pose)
+def _scalers() -> tuple[Scaler, Scaler]:
+    global _AUDIO_SCALER, _VIDEO_SCALER
+    if _AUDIO_SCALER is None:
+        ckpt_dir = _CONFIG["checkpoints"]["dir"]
+        _AUDIO_SCALER = Scaler.load(f"{ckpt_dir}/audio_scaler")
+        _VIDEO_SCALER = Scaler.load(f"{ckpt_dir}/video_scaler")
+    return _AUDIO_SCALER, _VIDEO_SCALER
 
-#    return(str(text_tensor.shape) + str(audio_tensor.shape) + str(video_tensor.shape))
-    return make_predictions(text_tensor, audio_tensor, video_tensor)
 
-'''transcript = pd.read_csv('daic_woz/dev_data/490/490_TRANSCRIPT.csv', delimiter = '\t', encoding = 'utf-8', engine = 'python')
+def _model(text_dim: int, audio_dim: int, video_dim: int) -> MultimodalLSTM:
+    global _MODEL
+    if _MODEL is None:
+        model = MultimodalLSTM(
+            text_dim, audio_dim, video_dim,
+            hidden_size=_CONFIG["model"]["hidden_size"],
+            output_size=_CONFIG["model"]["output_size"],
+            dropout=_CONFIG["model"]["dropout"],
+        )
+        load_checkpoint(model, f"{_CONFIG['checkpoints']['dir']}/multimodal_lstm.pth")
+        model.eval()
+        _MODEL = model
+    return _MODEL
 
-covarep = pd.read_csv('daic_woz/dev_data/490/490_COVAREP.csv', header = None)
 
-clnf_au = pd.read_csv('daic_woz/dev_data/490/490_CLNF_AUs.txt', delimiter = ',', engine = 'python')
-clnf_feat = pd.read_csv('daic_woz/dev_data/490/490_CLNF_features.txt', delimiter = ',', engine = 'python')
-clnf_feat3d = pd.read_csv('daic_woz/dev_data/490/490_CLNF_features3D.txt', delimiter = ',', engine = 'python')
-clnf_gaze = pd.read_csv('daic_woz/dev_data/490/490_CLNF_gaze.txt', delimiter = ',', engine = 'python')
-clnf_pose = pd.read_csv('daic_woz/dev_data/490/490_CLNF_pose.txt', delimiter = ',', engine = 'python')'''
+def process_pds(transcript, covarep, clnf_au, clnf_feat, clnf_feat3d, clnf_gaze, clnf_pose) -> dict:
+    text_out = text.extract(transcript, _word_vectors())
+    text_tensor = torch.from_numpy(text_out["tensor"]).view(-1, text.EMBED_DIM).float().unsqueeze(0)
 
-'''text_tensor = text_processing.return_tensor(transcript)
-audio_tensor = audio_processing.return_tensor(covarep)
-video_tensor = video_processing.return_tensor(clnf_au, clnf_feat, clnf_feat3d, clnf_gaze, clnf_pose)
+    audio_scaler, video_scaler = _scalers()
 
-output = make_predictions(text_tensor, audio_tensor, video_tensor)
-print(output)'''
+    audio_raw = audio.extract_raw(covarep)
+    audio_tensor, audio_mask = audio.to_tensor(audio_raw, audio_scaler, target_len=_CONFIG["features"]["audio"]["max_frames"])
+    audio_tensor = torch.from_numpy(audio_tensor).float().unsqueeze(0)
+
+    video_raw = video.extract_raw_from_files(clnf_au, clnf_feat, clnf_feat3d, clnf_gaze, clnf_pose)
+    video_tensor, video_mask = video.to_tensor(video_raw, video_scaler, target_len=_CONFIG["features"]["video"]["max_frames"])
+    video_tensor = torch.from_numpy(video_tensor).float().unsqueeze(0)
+
+    model = _model(text_tensor.shape[-1], audio_tensor.shape[-1], video_tensor.shape[-1])
+    with torch.no_grad():
+        logits = model(text_tensor, audio_tensor, video_tensor)
+        probability = torch.sigmoid(logits).item()
+
+    audio_coverage = float(audio_mask.mean())
+    video_coverage = float(video_mask.mean())
+
+    return {
+        "probability": probability,
+        "first_person_singular_rate": text_out["first_person_singular_rate"],
+        "negation_rate": text_out["negation_rate"],
+        "n_turns": text_out["n_turns"],
+        "audio_coverage": audio_coverage,
+        "video_coverage": video_coverage,
+    }

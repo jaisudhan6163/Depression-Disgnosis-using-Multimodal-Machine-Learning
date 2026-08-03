@@ -1,0 +1,35 @@
+# Data (DAIC-WOZ is access-restricted; never commit participant data)
+daic_woz/
+models/*.vec
+models/*.bin
+models/*.pth
+models/*.kv
+models/*.kv.*
+models/*.npy
+*.pth
+*.vec
+*.bin
+
+# Caches
+cache/
+.cache/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Results / logs
+results/*.csv
+results/runs/
+wandb/
+mlruns/
+
+# Environment
+.env
+.venv/
+venv/
+
+# OS
+.DS_Store
+
+# Claude
+.claude/
